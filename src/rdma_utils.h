@@ -179,7 +179,20 @@ class BackendMemoryAllocator {
       return it->second->addr;
     }
 
-    void *ptr = Backend::Get()->Alloc(requested_size);
+    PS_LOG(INFO) << "Allocating new buffer for key " << key;
+
+    constexpr size_t kMaxUsedBuffers = 6;
+    if (used_list_.find(requested_size) != used_list_.end()) {
+      // three batch overlap
+      if (std::get<0>(used_list_[requested_size]).size() == kMaxUsedBuffers) {
+        return std::get<0>(used_list_[requested_size])
+            [std::get<1>(used_list_[requested_size])++ % kMaxUsedBuffers];
+      }
+    }
+    void* ptr = Backend::Get()->Alloc(requested_size);
+    std::get<0>(used_list_[requested_size]).push_back(ptr);
+    std::get<1>(used_list_[requested_size]) =
+        std::get<0>(used_list_[requested_size]).size();
 
     /*cudaError_t cuda_err = cudaMalloc(&ptr, requested_size);
     if (cuda_err != cudaSuccess) {
@@ -223,6 +236,7 @@ class BackendMemoryAllocator {
   int associated_gpu_id_ = -1;
 
   std::unordered_map<uint64_t, struct ibv_mr *> key_to_mr_;
+  std::unordered_map<size_t, std::tuple<std::vector<void*>, size_t>> used_list_;
 };
 
 struct WRContext {
