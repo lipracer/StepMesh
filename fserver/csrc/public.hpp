@@ -180,7 +180,7 @@ void init() {
   worker_mask_ = (1 << num_worker_) - 1;
   q_.resize(num_worker_);
   q_signal_.store(0);
-  ps::StartPS(0, role_,  group_size_ * node_rank_ + gpu_ + offset, true);
+  ps::StartPS(0, role_,  group_size_ * node_rank_ + instance_id_ + offset, true);
   if (role_ == Node::WORKER) {
     fworker_ = new AFTensorWorker(instance_id_);
     barrier(true, true);
@@ -200,10 +200,10 @@ void register_recv_buffer(torch::Tensor& tensor,
 
 void stop() {
   if (role_ == Node::WORKER) {
-    ps::Postoffice::GetWorker(gpu_)->DoBarrier(0,
+    ps::Postoffice::GetWorker(instance_id_)->DoBarrier(0,
         ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler, true);
   } else if (role_ == Node::SERVER) {
-    ps::Postoffice::GetServer(gpu_)->DoBarrier(0,
+    ps::Postoffice::GetServer(instance_id_)->DoBarrier(0,
         ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler, true);
   } else {
     ps::Postoffice::Get()->DoBarrier(0,

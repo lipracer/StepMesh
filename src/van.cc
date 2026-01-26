@@ -213,7 +213,7 @@ void Van::ProcessAddNodeCommandAtScheduler(Message *msg, Meta *nodes,
       }
     }
 
-    // make sure ranks starts from 0 to num_servers and num_worker.
+    // make sure ranks starts from 0 to num_servers and num_workers.
     if (with_preferred_rank) {
       std::unordered_set<int> server_ranks;
       std::unordered_set<int> worker_ranks;
