@@ -139,7 +139,7 @@ class RDMAVan : public Van {
   }
 
   int Bind(Node &node, int max_retry) override {
-    PS_CHECK_EQ(my_node_.num_ports, 1)
+    PS_CHECK_EQ(node.num_ports, 1)
         << "RDMA van does not support multiple ports";
     PS_CHECK(rdma_create_id(event_channel_, &listener_, nullptr, RDMA_PS_TCP) ==
              0)
@@ -148,9 +148,9 @@ class RDMAVan : public Van {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
 
-    auto val = Environment::Get()->find("DMLC_NODE_HOST");
+    auto val = node.hostname.c_str();
     if (val) {
-      PS_VLOG(1) << "bind to DMLC_NODE_HOST: " << std::string(val);
+      PS_VLOG(1) << "bind to NODE_HOST: " << std::string(val);
       addr.sin_addr.s_addr = inet_addr(val);
     }
 
