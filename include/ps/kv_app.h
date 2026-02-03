@@ -276,6 +276,18 @@ class KVWorker : public SimpleApp {
     int group_server_rank = dst;
     int instance_server_id = postoffice_->GroupServerRankToInstanceID(
         group_server_rank, instance_idx_);
+    // TODO: more universal fixes
+    // worker id start at 8 and step is 2
+    static int num_server = ps::GetEnv("DMLC_NUM_SERVER", 1);
+    static int num_worker = ps::GetEnv("DMLC_NUM_WORKER", 1);
+    if (num_worker > num_server) {
+      instance_server_id = 8  // worker start index
+                           +
+                           (instance_server_id - 8) / 2     // rank index
+                               / (num_worker / num_server)  // works per server
+                               * 2  // stepmesh rank step
+          ;
+    }
 
     msg.meta.app_id = obj_->app_id();
     msg.meta.customer_id = obj_->customer_id();
@@ -301,6 +313,9 @@ class KVWorker : public SimpleApp {
     recv_kvs_.erase(ts);
     mu_.unlock();
   }
+
+  auto getPostOffice() const { return postoffice_; }
+  auto getPostOffice() { return postoffice_; }
 
  private:
   /**

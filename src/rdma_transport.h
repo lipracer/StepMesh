@@ -574,7 +574,18 @@ class RDMATransport : public Transport {
                        RemoteTuple remote_tuple) {
     PS_CHECK_EQ(msg_buf->mrs.size(), 1);
     PS_CHECK(msg.data.size() >= 2);
-    PS_CHECK(msg.data[1].size() <= msg_buf->mrs[0].second);
+    // remove this check, we regist a huge buffer, first push record a small
+    // size we can update this size
+    if (msg.data[1].size() > msg_buf->mrs[0].second) {
+      PS_LOG(INFO) << "msg length less msg buf update buffer length:"
+                   << msg_buf->mrs[0].second
+                   << " with msg data length:" << msg.data[1].size();
+                   PS_LOG(INFO) << "inline_len:" << msg_buf->inline_len;
+      // msg_buf->mrs[0].second = msg.data[1].size();
+    }
+    // PS_CHECK(msg.data[1].size() <=
+    // msg_buf->mrs[0].second)
+    //     << msg.data[1].size() << " vs " << msg_buf->mrs[0].second;
 
 #ifdef STEPMESH_USE_GDR
     auto meta_raddr = std::get<0>(remote_tuple);

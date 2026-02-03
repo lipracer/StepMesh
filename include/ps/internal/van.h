@@ -166,6 +166,10 @@ class Van {
    */
   virtual std::string GetType() const = 0;
 
+  virtual void registeMemory(void *ptr, size_t size) {
+    PS_CHECK(false) << "PS unreachable";
+  }
+
   static ErrHandle err_handle_;
 
  protected:

@@ -195,6 +195,15 @@ class AFTensorWorker {
     return std::make_pair(Trace(), Trace());
   }
 
+  void RegisterRecvTensor(torch::Tensor& push_tensor,
+                          std::vector<uint64_t>& push_keys,
+                          torch::Tensor& pull_tensor,
+                          std::vector<uint64_t>& pull_keys) {
+    void* mappedPtr = Backend::Get()->GetAccessibleAddr(push_tensor);
+    kv_.getPostOffice()->van()->registeMemory(
+        mappedPtr, push_tensor.numel() * push_tensor.itemsize());
+  }
+
  private:
   TensorEvent* GetEvent() {
     for (auto ev : events_) {

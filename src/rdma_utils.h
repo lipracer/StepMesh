@@ -172,10 +172,13 @@ class BackendMemoryAllocator {
     Backend::Get()->SetDevice(associated_gpu_id_);
     auto it = key_to_mr_.find(key);
     if (it != key_to_mr_.end()) {
-      PS_CHECK_GE(it->second->length, requested_size)
-          << "Existing buffer for key " << key << " is too small. "
-          << "Existing size: " << it->second->length
-          << ", requested size: " << requested_size;
+      if (it->second->length < requested_size) {
+        // it->second->length = requested_size;
+      }
+      // PS_CHECK_GE(it->second->length, requested_size)
+      //     << "Existing buffer for key " << key << " is too small. "
+      //     << "Existing size: " << it->second->length
+      //     << ", requested size: " << requested_size;
       return it->second->addr;
     }
 

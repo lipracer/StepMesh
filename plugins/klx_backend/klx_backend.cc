@@ -20,9 +20,26 @@
         << #func << " failed err:" << cudaGetErrorString(klx_errno); \
   } while (0)
 
+#define CHECK_MEM_LEAK
+
 namespace klx {
 
 using namespace ps;
+
+#ifdef CHECK_MEM_LEAK
+static struct MemChecker {
+  std::unordered_map<void*, size_t> mem_info_;
+
+  ~MemChecker() {
+    PS_LOG(INFO) << "MemChecker destruct!";
+    if (!mem_info_.empty()) {
+      for (const auto& it : mem_info_) {
+        PS_LOG(INFO) << "leak mem:" << it.first << " size:" << it.second;
+      }
+    }
+  }
+} mem_checker;
+#endif
 
 class KlxBackend : public Backend {
  public:
@@ -112,6 +129,9 @@ void* KlxBackend::Alloc(uint64_t size) {
   void* ptr = nullptr;
   KLX_RT_CALL(cudaMalloc, &ptr, size);
   auto hostPtr = GetAccessibleAddr(ptr, size);
+#ifdef CHECK_MEM_LEAK
+  mem_checker.mem_info_[ptr] = size;
+#endif
   return hostPtr;
 }
 
@@ -120,6 +140,10 @@ void KlxBackend::Free(void* m) {
   PS_VLOG(3) << "free klx memory " << m;
   {
     std::lock_guard<std::mutex> lg(mtx_);
+#ifdef CHECK_MEM_LEAK
+    mem_checker.mem_info_.erase(m);
+#endif
+
     if (ha_da_map_.erase(m)) {
       m = ha_da_map_[m];
     }
@@ -303,6 +327,6 @@ int KlxBackend::SyncMemEvent(void* event) {
   return BACKEND_OK;
 }
 
-dmlc::backend_registry<KlxBackend> _("KLX");
+dmlc::backend_registry<KlxBackend> _("GPU");
 
 }  // namespace klx

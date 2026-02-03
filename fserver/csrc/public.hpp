@@ -30,6 +30,7 @@ using ps::AFTensorMeta;
 using ps::KeyTensorBatch;
 using ps::KeyTensor;
 using ps::Backend;
+using ps::PS_VERBOSE;
 
 AFTensorServer* fserver_;
 AFTensorWorker* fworker_;
@@ -201,10 +202,16 @@ void init(const std::string& plugin) {
   }
 }
 
-void register_recv_buffer(torch::Tensor& tensor,
-                          std::vector<int>& worker_ranks,
+void register_recv_buffer(torch::Tensor& tensor, std::vector<int>& worker_ranks,
                           std::vector<uint64_t>& push_keys) {
   fserver_->RegisterRecvTensor(tensor, worker_ranks, push_keys);
+}
+
+void regist_push_pull_buffer(torch::Tensor& push_tensor,
+                               std::vector<uint64_t>& push_keys,
+                               torch::Tensor& pull_tensor,
+                               std::vector<uint64_t>& pull_keys) {
+  fworker_->RegisterRecvTensor(push_tensor, push_keys, pull_tensor, pull_keys);
 }
 
 void stop() {
@@ -253,8 +260,10 @@ void pybind_public(py::module &m){
         py::call_guard<py::gil_scoped_release>());
   m.def("stop", &stop, py::call_guard<py::gil_scoped_release>());
 
-  m.def("register_recv_buffer",
-        &register_recv_buffer,
+  m.def("register_recv_buffer", &register_recv_buffer,
+        py::call_guard<py::gil_scoped_release>());
+
+  m.def("regist_push_pull_buffer", &regist_push_pull_buffer,
         py::call_guard<py::gil_scoped_release>());
 
   // APIs for Attention Instances

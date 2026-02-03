@@ -139,12 +139,13 @@ class STEPMESH_API Backend {
       }
       std::string backend_type = "GPU";
       backend_type = Environment::Get()->find("STEPMESH_BACKEND", backend_type);
-      if (backends_.find(backend_type) == backends_.end()) {
-        PS_CHECK_NE(backend_ctors_.find(backend_type), backend_ctors_.end())
-            << "failed to get backend impl: " << backend_type;
+      if (backend_ctors_.find(backend_type) != backend_ctors_.end()) {
+        if (backends_.find(backend_type) != backends_.end()) {
+          PS_LOG(WARNING) << "overload backend:" << backend_type;
+        }
         backends_[backend_type] = backend_ctors_[backend_type]();
       }
-
+      PS_CHECK(backends_.find(backend_type) != backends_.end());
       backend_impl = backends_[backend_type];
     }
     return backend_impl;

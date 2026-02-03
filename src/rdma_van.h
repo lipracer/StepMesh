@@ -672,6 +672,18 @@ class RDMAVan : public Van {
     return msg_buf;
   }
 
+  void registeMemory(void* ptr, size_t size) final {
+    auto temp_mr = ibv_reg_mr(mem_allocator_->GetPD(), ptr, size,
+                              IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    if (temp_mr == nullptr) {
+      PS_CHECK(0) << "Failed to register the memory region: " << strerror(errno)
+                  << ", data=" << reinterpret_cast<void*>(ptr)
+                  << ", size=" << size;
+    }
+
+    mem_mr_[reinterpret_cast<char*>(ptr)] = temp_mr;
+  }
+
   void RegisterMemory(Message& msg) {
     size_t sa_cnt = 0;
     for (auto& sa : msg.data) {
