@@ -21,7 +21,7 @@ if is_worker:
         f,
         num_micro_batch,
         torch.empty(
-            [num_micro_batch, 1024 * 1024], dtype=torch.float32, device=f"cuda:{gpu}"
+            [num_micro_batch, 1024 * 1024 * 4], dtype=torch.int8, device=f"cuda:{gpu}"
         ),
         keys=[2 + i for i in range(num_micro_batch)],
     )
@@ -49,7 +49,7 @@ elif is_server:
         f,
         num_micro_batch,
         torch.empty(
-            [2, num_micro_batch, 1024 * 1024], dtype=torch.float32, device=f"cuda:{gpu}"
+            [2, num_micro_batch, 1024 * 1024 * 4], dtype=torch.int8, device=f"cuda:{gpu}"
         ),
         keys=[2 + i for i in range(num_micro_batch)],
     )

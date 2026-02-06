@@ -4,6 +4,7 @@ import torch
 from pathlib import Path
 import itertools
 import logging
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class AfdTensorCommunicator:
 class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
     def __init__(self, *args, **kvargs):
         super().__init__(*args, **kvargs)
-        self.handlers = []
+        self.handlers = deque()
 
     def regist_cache(self):
         for i in range(self.micro_batch_size):
@@ -74,7 +75,8 @@ class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
 
     def send_impl(self, x, micro_batch_index):
         send_buffer = self.cache[micro_batch_index]
-        send_buffer.view(-1)[: x.numel()].view_as(x)
+        send_buffer = send_buffer.view(x.dtype)
+        send_buffer = send_buffer.view(-1)[: x.numel()].view_as(x)
         send_buffer.copy_(x)
 
         h = self.f.push_pull(
@@ -86,7 +88,7 @@ class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
         self.handlers.append((h, send_buffer))
 
     def recv_impl(self, micro_batch_index):
-        handler, res = self.handlers.pop(0)
+        handler, res = self.handlers.popleft()
         self.f.wait(handler)
         return res
 
@@ -94,7 +96,7 @@ class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
 class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
     def __init__(self, *args, **kvargs):
         super().__init__(*args, **kvargs)
-        self.comm_ids = []
+        self.comm_ids = deque()
 
     def regist_cache(self):
         num_server = os.environ.get("DMLC_NUM_SERVER")
@@ -117,11 +119,11 @@ class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
                     )
 
     def send_impl(self, x, micro_batch_index):
-        comm_id = self.comm_ids.pop(0)
+        comm_id = self.comm_ids.popleft()
         self.f.respond([x], comm_id[0], True)
 
     def send_list_impl(self, x, micro_batch_index):
-        comm_id = self.comm_ids.pop(0)
+        comm_id = self.comm_ids.popleft()
         for i in range(len(comm_id)):
             self.f.respond([x[i]], comm_id[i], True)
 
