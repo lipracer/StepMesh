@@ -50,6 +50,29 @@ struct AFTensorRequest {
   TensorEvent* event = nullptr;
 };
 
+template <typename T>
+std::tuple<void*, size_t> getSafeTensorPtrAndSize(const at::Tensor& tensor,
+                                                  T* app) {
+  size_t tensor_size = tensor.numel() * tensor.itemsize();
+  void* mappedPtr = nullptr;
+  if (tensor_size == 0) {
+    PS_CHECK(app->registed_ptrs_.size())
+        << "tensor size is 0 and has not registed ptr";
+    if (app->registed_ptrs_.size()) {
+      mappedPtr = app->registed_ptrs_[0];
+      tensor_size = 1;
+    } else {
+      // use pytorch allocator avoid memory fragmentation
+      static auto t = torch::empty({1}, tensor.options());
+      mappedPtr = Backend::Get()->GetAccessibleAddr(t);
+      tensor_size = 1;
+    }
+  } else {
+    mappedPtr = Backend::Get()->GetAccessibleAddr(tensor);
+  }
+  return std::make_tuple(mappedPtr, tensor_size);
+}
+
 /**
  * \brief Attention-FFN Disaggregation Worker
  */
@@ -200,6 +223,7 @@ class AFTensorWorker {
                           torch::Tensor& pull_tensor,
                           std::vector<uint64_t>& pull_keys) {
     void* mappedPtr = Backend::Get()->GetAccessibleAddr(push_tensor);
+    registed_ptrs_.push_back(mappedPtr);
     kv_.getPostOffice()->van()->registeMemory(
         mappedPtr, push_tensor.numel() * push_tensor.itemsize());
   }
@@ -244,10 +268,10 @@ class AFTensorWorker {
 
   void ZPush_(int ts, const SArray<Key>& keys, const at::Tensor& tensor,
               int cmd = 0) {
+    auto [mappedPtr, tensor_size] = getSafeTensorPtrAndSize(tensor, this);
     SArray<char> val;
-    void* mappedPtr = Backend::Get()->GetAccessibleAddr(tensor);
-    val.reset(reinterpret_cast<char*>(mappedPtr),
-              tensor.numel() * tensor.itemsize(), [tensor](void*) {});
+    val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size,
+              [tensor](void*) {});
 
     Message msg;
     msg.meta.request = true;
@@ -255,7 +279,7 @@ class AFTensorWorker {
     msg.meta.push = true;
     msg.meta.timestamp = ts;
     msg.meta.addr = reinterpret_cast<uint64_t>(mappedPtr);
-    msg.meta.val_len = tensor.numel() * tensor.itemsize();
+    msg.meta.val_len = tensor_size;
     PS_VLOG(2) << "ZPush_ addr: 0x" << std::hex << msg.meta.addr << std::dec
                << " val_len: " << msg.meta.val_len;
     msg.meta.key = keys[0];
@@ -285,24 +309,24 @@ class AFTensorWorker {
     int server_count = server_ranges.size();
     int pull_batch_size = static_cast<int>(pull_tensors.size() / server_count);
     for (int i = 0; i < server_count; i++) {
+      auto tensor = pull_tensors[i * pull_batch_size + index].val;
+
+      auto [mappedPtr, tensor_size] = getSafeTensorPtrAndSize(tensor, this);
+
       Message msg;
       msg.meta.timestamp = ts;
       SArray<char> val;
       SArray<Key> key(1);
-
-      auto tensor = pull_tensors[i * pull_batch_size + index].val;
-
       *key.data() = pull_tensors[i * pull_batch_size + index].key;
 
-      void* mappedPtr = Backend::Get()->GetAccessibleAddr(tensor);
-      val.reset(reinterpret_cast<char*>(mappedPtr),
-                tensor.numel() * tensor.itemsize(), [tensor](void*) {});
+      val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size,
+                [tensor](void*) {});
 
       msg.meta.request = true;
       msg.meta.head = cmd;
       msg.meta.push = false;
       msg.meta.addr = reinterpret_cast<uint64_t>(mappedPtr);
-      msg.meta.val_len = tensor.numel() * tensor.itemsize();
+      msg.meta.val_len = tensor_size;
       msg.meta.key = key[0];
       msg.meta.is_tensor = 1;
       msg.meta.dtype = static_cast<int>(tensor.scalar_type());
@@ -395,6 +419,10 @@ class AFTensorWorker {
   std::thread pushpull_thread_;
   /** \brief response stop signal */
   std::atomic_bool pushpull_stop_;
+
+ public:
+  // TODO: remove this, use a ptr for zero tensor.
+  std::vector<void*> registed_ptrs_;
 };
 
 /** \brief meta information about a kv request */
@@ -494,10 +522,9 @@ class AFTensorServer {
         res.keys = key;
 
         SArray<char> tensor_val;
-        tensor_val.reset(reinterpret_cast<char*>(
-                             Backend::Get()->GetAccessibleAddr(tensors[0].val)),
-                         tensors[0].val.numel() * tensors[0].val.itemsize(),
-                         [](void*) {});
+        auto [mappedPtr, tensor_size] =
+            getSafeTensorPtrAndSize(tensors[0].val, this);
+        tensor_val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size, [](void*) {});
         res.vals = tensor_val;
 
         kv_.Response(meta.pull_metas[0], res, GetEvent());
@@ -516,11 +543,10 @@ class AFTensorServer {
             SArray<Key> key(1);
             *key.data() = res_kv.key;
             rsp.kv_pair.keys = key;
-
-            rsp.kv_pair.vals.reset(
-                reinterpret_cast<char*>(
-                    Backend::Get()->GetAccessibleAddr(res_kv.val)),
-                res_kv.val.numel() * res_kv.val.itemsize(), [](void*) {});
+            auto [mappedPtr, tensor_size] =
+                getSafeTensorPtrAndSize(tensors[0].val, this);
+            rsp.kv_pair.vals.reset(reinterpret_cast<char*>(mappedPtr),
+                                   tensor_size, [](void*) {});
 
             rsp.kv_meta = kv_meta;
             if (need_event) {
@@ -581,6 +607,7 @@ class AFTensorServer {
       RegisterRecvBuffer_(worker_ranks[i], keys[i], buffer_ptr + chunk_size * i,
                           chunk_size);
     }
+    registed_ptrs_.push_back(buffer_ptr);
   }
 
  private:
@@ -735,6 +762,10 @@ class AFTensorServer {
   std::thread response_thread_;
   /** \brief response stop signal */
   std::atomic_bool response_stop_;
+
+ public:
+  // TODO: remove this, use a ptr for zero tensor.
+  std::vector<void*> registed_ptrs_;
 };
 
 }  // namespace ps

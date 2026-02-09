@@ -37,31 +37,36 @@ class AfdTensorCommunicator:
         self.keys = keys
 
         if self.keys is None:
-            self.keys = [2 + i for i in range(micro_batch_size)]
+            key_start = 1 + int(torch.cuda.current_device()) << 16
+            self.keys = [key_start + i for i in range(micro_batch_size)]
 
         if enable_cache:
             self.regist_cache()
 
-        self.index_gen = itertools.cycle([i // 2 for i in range(2 * micro_batch_size)])
+        # NB: don't reuse, send and recv not paired
+        self.send_index_gen = itertools.cycle([i for i in range(micro_batch_size)])
+        self.recv_index_gen = itertools.cycle([i for i in range(micro_batch_size)])
 
     def send(self, x):
         assert isinstance(x, torch.Tensor)
-        assert (
-            x.numel() <= self.cache[0].numel()
-        ), "send tensor size {x.shape} must less equal cache size:{self.cache[0].shape}"
-        self.send_impl(x, next(self.index_gen))
+        if x.numel() * x.element_size() > self.cache[0].numel():
+            self.update_cache(x.numel() * x.element_size())
+        self.send_impl(x, next(self.send_index_gen))
 
     def send_list(self, x):
         assert isinstance(x, list)
-        self.send_list_impl(x, next(self.index_gen))
+        self.send_list_impl(x, next(self.send_index_gen))
 
     def recv(self):
-        micro_batch_index = next(self.index_gen)
+        micro_batch_index = next(self.recv_index_gen)
         return self.recv_impl(micro_batch_index)
 
     def recv_list(self):
-        micro_batch_index = next(self.index_gen)
+        micro_batch_index = next(self.recv_index_gen)
         return self.recv_list_impl(micro_batch_index)
+
+    def update_cache(self, new_size):
+        assert False, "not implemented please update cache size to {new_size}"
 
 
 class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
@@ -106,12 +111,20 @@ class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
         num_worker = int(num_worker)
 
         if num_server == num_worker:
+            # d0 is micro batch index
+            # d1 is cahce size
+            if self.cache.ndim != 2:
+                self.cache = self.cache.reshape(self.micro_batch_size, -1)
             for i in range(self.micro_batch_size):
                 self.f.register_recv_buffer(self.cache[i], [0], [self.keys[i]])
         else:
             assert num_worker >= num_server
             num_a_per_f = num_worker // num_server
-            assert self.cache.ndim == 3
+            # d0 is rank
+            # d1 is micro batch index
+            # d2 is cahce size
+            if self.cache.ndim != 3:
+                self.cache = self.cache.reshape(num_a_per_f, self.micro_batch_size, -1)
             for rank in range(num_a_per_f):
                 for micro_batch in range(self.micro_batch_size):
                     self.f.register_recv_buffer(

@@ -104,7 +104,12 @@ void respond(std::vector<torch::Tensor>& tensors,
   PS_CHECK_EQ(tensors.size(), reqmeta.pull_tensors.size());
   std::vector<KeyTensor> result;
   for (size_t i = 0; i < tensors.size(); ++i) {
-    result.push_back({reqmeta.pull_tensors[i].key, std::move(tensors[i].detach())});
+    result.push_back(
+        {reqmeta.pull_tensors[i].key, std::move(tensors[i].detach())});
+  }
+  // zero tensor need not event
+  if (tensors.size() == 1 && tensors[0].numel() == 0) {
+    need_event = false;
   }
   fserver_->Response(reqmeta, result, need_event);
 }
@@ -142,6 +147,9 @@ int push_pull(std::vector<torch::Tensor>& push_tensors,
     pull_batch[i] = KeyTensor{
         static_cast<uint64_t>(pull_keys[i]), std::move(pull_tensors[i].detach())
     };
+  }
+  if (push_tensors.size() == 1 && push_tensors[0].numel() == 0) {
+    need_event = false;
   }
   return fworker_->ZBatchPushPull(push_batch, pull_batch, need_event);
 }
