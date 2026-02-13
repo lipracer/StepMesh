@@ -213,13 +213,15 @@ void init(const std::string& plugin) {
 void register_recv_buffer(torch::Tensor& tensor, std::vector<int>& worker_ranks,
                           std::vector<uint64_t>& push_keys) {
   fserver_->RegisterRecvTensor(tensor, worker_ranks, push_keys);
+  barrier(true, true);
 }
 
 void regist_push_pull_buffer(torch::Tensor& push_tensor,
-                               std::vector<uint64_t>& push_keys,
-                               torch::Tensor& pull_tensor,
-                               std::vector<uint64_t>& pull_keys) {
+                             std::vector<uint64_t>& push_keys,
+                             torch::Tensor& pull_tensor,
+                             std::vector<uint64_t>& pull_keys) {
   fworker_->RegisterRecvTensor(push_tensor, push_keys, pull_tensor, pull_keys);
+  barrier(true, true);
 }
 
 void stop() {

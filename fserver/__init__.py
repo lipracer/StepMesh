@@ -8,6 +8,16 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
+logger_verbose = os.environ.get("PS_VERBOSE")
+ps_logger = logger.info
+
+if logger_verbose and int(logger_verbose) == 1:
+    ps_logger = logger.warning
+
+# def my_logger(msg):
+#     print(msg, flush=True)
+
+ps_logger = logger.info
 
 def fslib():
     old_flags = sys.getdlopenflags()
@@ -38,8 +48,10 @@ class AfdTensorCommunicator:
 
         if self.keys is None:
             key_start = 1 + int(torch.cuda.current_device()) << 16
+            ps_logger(f"key_start:{key_start} {int(torch.cuda.current_device())} {int(torch.cuda.current_device()) << 16}")
             self.keys = [key_start + i for i in range(micro_batch_size)]
 
+        ps_logger(f"keys:{self.keys}")
         if enable_cache:
             self.regist_cache()
 
@@ -79,6 +91,7 @@ class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
             self.f.regist_push_pull_buffer(self.cache[i], [0], self.cache[i], [0])
 
     def send_impl(self, x, micro_batch_index):
+        ps_logger(f"attn micro_batch:{micro_batch_index} send x:{x.shape} key:{self.keys[micro_batch_index]}")
         send_buffer = self.cache[micro_batch_index]
         send_buffer = send_buffer.view(x.dtype)
         send_buffer = send_buffer.view(-1)[: x.numel()].view_as(x)
@@ -93,6 +106,7 @@ class AfdTensorCommunicatorATTN(AfdTensorCommunicator):
         self.handlers.append((h, send_buffer))
 
     def recv_impl(self, micro_batch_index):
+        ps_logger(f"attn micro_batch:{micro_batch_index} recv")
         handler, res = self.handlers.popleft()
         self.f.wait(handler)
         return res
@@ -115,8 +129,8 @@ class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
             # d1 is cahce size
             if self.cache.ndim != 2:
                 self.cache = self.cache.reshape(self.micro_batch_size, -1)
-            for i in range(self.micro_batch_size):
-                self.f.register_recv_buffer(self.cache[i], [0], [self.keys[i]])
+            for micro_batch in range(self.micro_batch_size):
+                self.f.register_recv_buffer(self.cache[micro_batch], [0], [self.keys[micro_batch]])
         else:
             assert num_worker >= num_server
             num_a_per_f = num_worker // num_server
@@ -132,6 +146,7 @@ class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
                     )
 
     def send_impl(self, x, micro_batch_index):
+        ps_logger(f"ffn micro_batch:{micro_batch_index} send x:{x.shape}")
         comm_id = self.comm_ids.popleft()
         self.f.respond([x], comm_id[0], True)
 
@@ -141,6 +156,7 @@ class AfdTensorCommunicatorFFN(AfdTensorCommunicator):
             self.f.respond([x[i]], comm_id[i], True)
 
     def recv_impl(self, micro_batch_index):
+        ps_logger(f"ffn micro_batch:{micro_batch_index} recv")
         """
         batch struct:
         [
