@@ -100,8 +100,9 @@ class STEPMESH_API Backend {
   }
 
   virtual void* GetAccessibleAddr(const at::Tensor& tensor) {
-    return GetAccessibleAddr(tensor.data_ptr(),
-                             tensor.numel() * tensor.element_size());
+    return GetAccessibleAddr(
+        reinterpret_cast<char*>(tensor.data_ptr()) + tensor.storage_offset(),
+        tensor.numel() * tensor.element_size());
   }
 
   virtual void* GetDeviceAddrFromHostPtr(void* hostPtr, size_t size) {

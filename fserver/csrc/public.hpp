@@ -19,6 +19,7 @@
 #include <chrono>
 
 #include "./util.hpp"
+#include "ps/cudagraph.h"
 
 #ifndef PUBLIC_OPS_
 #define PUBLIC_OPS_
@@ -225,6 +226,7 @@ void regist_push_pull_buffer(torch::Tensor& push_tensor,
 }
 
 void stop() {
+  ps::CudaGraphContext::instance().destroy();
   if (role_ == Node::WORKER) {
     ps::Postoffice::GetWorker(gpu_)->DoBarrier(0,
         ps::kWorkerGroup + ps::kServerGroup + ps::kScheduler, true);
@@ -260,12 +262,35 @@ std::vector<uint64_t> fetch_trace(int handler) {
   return vec;
 }
 
-uint64_t get_nanosecond() {
-  return ps::GetNanosecond();
+uint64_t get_nanosecond() { return ps::GetNanosecond(); }
+
+void cudagraph_set_config(int64_t num_micro_batch) {
+  ps::CudaGraphContext::instance().set_config(num_micro_batch, role_);
 }
 
+void capture_begin() { ps::CudaGraphContext::instance().capture_begin(); }
 
-void pybind_public(py::module &m){
+void cudagraph_replay(size_t graph) {
+  ps::CudaGraphContext::instance().replay(graph);
+}
+
+size_t capture_end() {
+  return ps::CudaGraphContext::instance().capture_end(); 
+}
+
+void cudagraph_regist_flag(const std::vector<at::Tensor>& flags) {
+  std::vector<void*> new_flags;
+  for(auto flag : flags) {
+    new_flags.push_back(flag.data_ptr());
+  }
+  ps::CudaGraphContext::instance().regist_flag(new_flags);
+}
+
+void cudagraph_set_stage(int stage) {
+  ps::CudaGraphContext::instance().set_stage(stage);
+}
+
+void pybind_public(py::module& m) {
   m.def("init", &init, py::arg("plugin") = "",
         py::call_guard<py::gil_scoped_release>());
   m.def("stop", &stop, py::call_guard<py::gil_scoped_release>());
@@ -307,6 +332,18 @@ void pybind_public(py::module &m){
     py::arg("instance_barrier") = true,
     py::call_guard<py::none>());
   m.def("get_nanosecond", &get_nanosecond, py::call_guard<py::none>());
+
+  m.def("cudagraph_set_config", &cudagraph_set_config,
+        pybind11::arg("num_micro_batch"), py::call_guard<py::none>());
+  m.def("capture_begin", &capture_begin, py::call_guard<py::none>());
+
+  m.def("capture_end", &capture_end, py::call_guard<py::none>());
+
+  m.def("cudagraph_replay", &cudagraph_replay, py::arg("g"),
+        py::call_guard<py::none>());
+
+  m.def("cudagraph_regist_flag", &cudagraph_regist_flag, py::arg("flag"), py::call_guard<py::none>());
+  m.def("cudagraph_set_stage", &cudagraph_set_stage, py::arg("stage"), py::call_guard<py::none>());
 }
 
 #endif

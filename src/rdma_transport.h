@@ -31,6 +31,7 @@
 #include "./rdma_utils.h"
 #include "dmlc/logging.h"
 #include "ps/internal/multi_qp.h"
+#include "ps/cudagraph.h"
 
 namespace ps {
 
@@ -279,7 +280,8 @@ class Transport {
   virtual void RDMAWriteWithImm(MessageBuffer *msg_buf, uint64_t remote_addr,
                                 uint32_t rkey, uint32_t idx,
                                 bool inline_write = false,
-                                struct ibv_send_wr *prev_wr = nullptr) = 0;
+                                struct ibv_send_wr *prev_wr = nullptr,
+                                bool replay = false) = 0;
 
   virtual int RecvPushRequest(Message *msg, BufferContext *buffer_ctx,
                               int meta_len) = 0;
@@ -349,7 +351,8 @@ class RDMATransport : public Transport {
   virtual void RDMAWriteWithImm(MessageBuffer *msg_buf, uint64_t remote_addr,
                                 uint32_t rkey, uint32_t idx,
                                 bool inline_write = false,
-                                struct ibv_send_wr *prev_wr = nullptr) {
+                                struct ibv_send_wr *prev_wr = nullptr,
+                                bool replay = false) {
     struct ibv_sge sge;
     sge.addr = reinterpret_cast<uint64_t>(msg_buf->inline_buf);
     sge.length = msg_buf->inline_len;
@@ -376,6 +379,9 @@ class RDMATransport : public Transport {
           << "ibv_post_send failed.";
     } else {
       prev_wr->next = &wr;
+      if (replay) {
+        prev_wr->next = nullptr;
+      }
       PS_CHECK_EQ(ibv_post_send(endpoint_->cm_ids[0]->qp, prev_wr, &bad_wr), 0)
           << "ibv_post_send failed.";
     }
@@ -567,7 +573,8 @@ class RDMATransport : public Transport {
     auto idx = std::get<2>(remote_tuple);
 #endif
 
-    RDMAWriteWithImm(msg_buf, raddr, rkey, idx, true, nullptr);
+    RDMAWriteWithImm(msg_buf, raddr, rkey, idx, true, nullptr,
+                     msg.meta.is_replay());
   }
 
   void SendPushRequest(Message &msg, MessageBuffer *msg_buf,
@@ -640,7 +647,8 @@ class RDMATransport : public Transport {
       }
       PS_CHECK_EQ(ibv_post_send(endpoint_->cm_ids[0]->qp, &data_wr, &bad_wr), 0)
           << "ibv_post_send failed.";
-      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr);
+      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr,
+                       msg.meta.is_replay());
 
       data_wr.wr.rdma.remote_addr += data_sge.length;
       data_sge.addr += data_sge.length;
@@ -650,6 +658,9 @@ class RDMATransport : public Transport {
       for (int qpIndex = 1; qpIndex < QP_NUM; qpIndex++) {
         data_wr.wr_id = reinterpret_cast<uint64_t>(msg_buf);
         data_wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+        if (msg.meta.is_replay()) {
+          data_wr.opcode = IBV_WR_RDMA_WRITE;
+        }
         data_wr.imm_data = slave_idx;
         data_wr.send_flags = IBV_SEND_SIGNALED;
 
@@ -661,7 +672,8 @@ class RDMATransport : public Transport {
         data_sge.addr += data_sge.length;
       }
     } else {
-      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, &data_wr);
+      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, &data_wr,
+                       msg.meta.is_replay());
     }
   }
 
@@ -684,9 +696,10 @@ class RDMATransport : public Transport {
     auto data_raddr = msg.meta.addr;
     auto data_rkey = msg.meta.option;
     auto data_len = msg.meta.val_len;
-    PS_CHECK_EQ((size_t)msg.meta.val_len, msg_buf->data[1].size())
-        << "val len" << (size_t)msg.meta.val_len << " data len "
-        << msg_buf->data[1].size();
+    // TODO() chenk correctness use cache, then the size may difference
+    // PS_CHECK_EQ((size_t)msg.meta.val_len, msg_buf->data[1].size())
+    //     << "val len=" << (size_t)msg.meta.val_len
+    //     << " data len=" << msg_buf->data[1].size();
 
     struct ibv_sge data_sge;
     data_sge.addr = reinterpret_cast<uint64_t>(msg_buf->data[1].data());
@@ -727,7 +740,8 @@ class RDMATransport : public Transport {
       }
       PS_CHECK_EQ(ibv_post_send(endpoint_->cm_ids[0]->qp, &data_wr, &bad_wr), 0)
           << "ibv_post_send failed.";
-      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr);
+      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr,
+                       msg.meta.is_replay());
 
       data_wr.wr.rdma.remote_addr += data_sge.length;
       data_sge.addr += data_sge.length;
@@ -737,6 +751,9 @@ class RDMATransport : public Transport {
       for (int qpIndex = 1; qpIndex < QP_NUM; qpIndex++) {
         data_wr.wr_id = reinterpret_cast<uint64_t>(msg_buf);
         data_wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+        if (msg.meta.is_replay()) {
+          data_wr.opcode = IBV_WR_RDMA_WRITE;
+        }
         data_wr.imm_data = slave_idx;
         data_wr.send_flags = IBV_SEND_SIGNALED;
 
@@ -750,9 +767,13 @@ class RDMATransport : public Transport {
     } else {
       PS_CHECK_EQ(ibv_post_send(endpoint_->cm_ids[0]->qp, &data_wr, &bad_wr), 0)
           << "ibv_post_send failed.";
+      if (msg.meta.is_replay()) {
+        return;
+      }
 
       // after write keys/vals/lens (no imm), write the meta (with imm)
-      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr);
+      RDMAWriteWithImm(msg_buf, meta_raddr, meta_rkey, idx, true, nullptr,
+                       msg.meta.is_replay());
     }
   }
 

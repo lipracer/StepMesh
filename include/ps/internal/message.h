@@ -209,9 +209,9 @@ struct Control {
 
 class TensorEvent {
  public:
-  TensorEvent() : is_recorded_(false), is_released_(true) {
-    ev_ = Backend::Get()->CreateEvent();
-  }
+  TensorEvent() : TensorEvent(Backend::Get()->CreateEvent()) {}
+
+  TensorEvent(void* e) : is_recorded_(false), is_released_(true), ev_(e) {}
 
   ~TensorEvent() { Backend::Get()->FreeEvent(ev_); }
 
@@ -286,6 +286,7 @@ struct Meta {
     if (head != kEmpty) ss << ", head=" << head;
     if (control.empty() && !simple_app)
       ss << ", key=" << key;  // valid data msg
+    ss << " capture_info=" << (int)capture_info.stage;
     if (body.size()) ss << ", body=" << body;
     if (data_type.size()) {
       ss << ", dtype={";
@@ -356,6 +357,11 @@ struct Meta {
   uint64_t slave_qp_counter[QP_MAX_NUM];
   /** \brief the number of slave qps */
   int slave_qp_num;
+  CudaGraphInfo capture_info;
+
+  bool is_replay() {
+    return control.empty() && capture_info.stage == CudaGraphInfo::kReplay;
+  }
 };
 
 /**
@@ -394,7 +400,7 @@ struct Message {
          << DeviceTypeName[meta.dst_dev_type] << "(" << meta.dst_dev_id << ") "
          << "data_size=[";
       for (const auto& d : data) {
-        ss << d.size() << ",";
+        ss << (void*)(d.data()) << "|" << d.size() << ",";
       }
       ss << "] }";
     }

@@ -10,6 +10,7 @@
 
 #include "dmlc/backend_registry.h"
 #include "ps/backend.h"
+#include "ps/cudagraph.h"
 #include "ps/hash_table8.hpp"
 #include "ps/internal/gpu_backend.h"
 
@@ -163,17 +164,18 @@ void* KlxBackend::GetAccessibleAddr(void* devicePtr, size_t size) {
             reinterpret_cast<intptr_t>(ha_da_map_[attrs.hostPointer]));
   }
   ha_da_map_.emplace_unique(attrs.hostPointer, devicePtr);
-
+  PS_CHECK_NE(attrs.hostPointer, nullptr);
   return attrs.hostPointer;
 }
 
 void* KlxBackend::GetAccessibleAddr(const at::Tensor& tensor) {
   if (tensor.device().type() == at::kCUDA) {
-    return GetAccessibleAddr(tensor.data_ptr(),
-                             tensor.numel() * tensor.element_size());
+    return GetAccessibleAddr(
+        reinterpret_cast<char*>(tensor.data_ptr()) + tensor.storage_offset(),
+        tensor.numel() * tensor.element_size());
   }
   PS_CHECK_EQ(tensor.device().type(), at::kCPU);
-  return tensor.data_ptr();
+  return reinterpret_cast<char*>(tensor.data_ptr()) + tensor.storage_offset();
 }
 
 void* KlxBackend::GetDeviceAddrFromHostPtr(void* hostPtr, size_t size) {
@@ -184,40 +186,61 @@ void* KlxBackend::GetDeviceAddrFromHostPtr(void* hostPtr, size_t size) {
 
 void* KlxBackend::CreateEvent() {
   DoInitGpu();
-  if (!mem_sync_) {
-    return CreateCudaEvent();
+  Event* e = (Event*)malloc(sizeof(Event));
+  if (ps::CudaGraphContext::instance().is_capturing()) {
+    e->data = CudaGraphContext::instance().create_wait_event();
+    e->kind = Event::kGraphEventCapturing;
+  } else if (!mem_sync_) {
+    e->data = CreateCudaEvent();
+    e->kind = Event::kCudaEvent;
   } else {
-    return CreateMemEvent();
+    e->data = CreateMemEvent();
+    e->kind = Event::kMemEvent;
   }
+  return e;
 }
 
 int KlxBackend::FreeEvent(void* event) {
   DoInitGpu();
   PS_CHECK_NE(event, nullptr) << "backend cannot free null event";
+  auto e = event;
+  event = N_EVENT(event);
+  free(e);
   if (!mem_sync_) {
-    return FreeCudaEvent(event);
+    return FreeCudaEvent(N_EVENT(event));
   } else {
-    return FreeMemEvent(event);
+    return FreeMemEvent(N_EVENT(event));
   }
 }
 
 int KlxBackend::RecordEvent(void* event, void* stream) {
   DoInitGpu();
+  PS_LOG(INFO) << "klx backend record event kind:" << W_EVENT(event)->kind
+               << " klx backend record event:" << event;
+  if (W_EVENT(event)->kind >= Event::kGraphEventCapturing) {
+    return CudaGraphContext::instance().record(N_EVENT(event), stream);
+  }
+
   PS_CHECK_NE(event, nullptr) << "backend cannot record null event";
   if (!mem_sync_) {
-    return RecordCudaEvent(event, stream);
+    return RecordCudaEvent(N_EVENT(event), stream);
   } else {
-    return RecordMemEvent(event, stream);
+    return RecordMemEvent(N_EVENT(event), stream);
   }
 }
 
 int KlxBackend::SyncEvent(void* event) {
   DoInitGpu();
+  PS_LOG(INFO) << "klx backend sync event kind:" << W_EVENT(event)->kind;
   PS_CHECK_NE(event, nullptr) << "backend cannot sync null event";
+  if (W_EVENT(event)->kind >= Event::kGraphEventCapturing) {
+    return CudaGraphContext::instance().event_sync(event);
+  }
+
   if (!mem_sync_) {
-    return SyncCudaEvent(event);
+    return SyncCudaEvent(N_EVENT(event));
   } else {
-    return SyncMemEvent(event);
+    return SyncMemEvent(N_EVENT(event));
   }
 }
 

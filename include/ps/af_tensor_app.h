@@ -24,6 +24,8 @@
 #include "ps/internal/utils.h"
 #include "ps/kv_app.h"
 
+#include "ps/cudagraph.h"
+
 namespace ps {
 
 constexpr int kDefaultEventBufferSize = 16;
@@ -48,6 +50,7 @@ struct AFTensorRequest {
   std::vector<int> push_timestamps;
   std::vector<int> pull_timestamps;
   TensorEvent* event = nullptr;
+  CudaGraphInfo capture_info;
 };
 
 template <typename T>
@@ -161,6 +164,8 @@ class AFTensorWorker {
 
     PS_VLOG(3) << "ts" << start_ts << " pushpull_queue_ push "
                << pushpull_queue_.Size();
+    ps::CudaGraphContext::instance().record(
+        req, [this](AFTensorRequest& req) { pushpull_queue_.Push(req); });
     pushpull_queue_.Push(std::move(req));
 
     // std::unique_lock<std::mutex> timestamp_lock(timestamp_mu_);
@@ -223,6 +228,7 @@ class AFTensorWorker {
                           torch::Tensor& pull_tensor,
                           std::vector<uint64_t>& pull_keys) {
     void* mappedPtr = Backend::Get()->GetAccessibleAddr(push_tensor);
+    ps::CudaGraphContext::instance().record_cache(mappedPtr);
     registed_ptrs_.push_back(mappedPtr);
     kv_.getPostOffice()->van()->registeMemory(
         mappedPtr, push_tensor.numel() * push_tensor.itemsize());
@@ -230,9 +236,11 @@ class AFTensorWorker {
 
  private:
   TensorEvent* GetEvent() {
-    for (auto ev : events_) {
-      if (ev->Occupy()) {
-        return ev;
+    if (!ps::CudaGraphContext::instance().is_capturing()) {
+      for (auto ev : events_) {
+        if (ev->Occupy()) {
+          return ev;
+        }
       }
     }
 
@@ -259,7 +267,7 @@ class AFTensorWorker {
         req.event = nullptr;
       }
       ZBatchPushPull_(req.push, req.push_timestamps, req.pull,
-                      req.pull_timestamps);
+                      req.pull_timestamps, req.capture_info);
       PS_VLOG(4) << "pushpull_queue_ Loop done " << req.push_timestamps[0]
                  << " " << req.pull_timestamps[0];
     }
@@ -267,13 +275,14 @@ class AFTensorWorker {
   }
 
   void ZPush_(int ts, const SArray<Key>& keys, const at::Tensor& tensor,
-              int cmd = 0) {
+              int cmd = 0, CudaGraphInfo capture_info= {}) {
     auto [mappedPtr, tensor_size] = getSafeTensorPtrAndSize(tensor, this);
     SArray<char> val;
     val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size,
               [tensor](void*) {});
 
     Message msg;
+    msg.meta.capture_info = capture_info;
     msg.meta.request = true;
     msg.meta.head = cmd;
     msg.meta.push = true;
@@ -303,7 +312,11 @@ class AFTensorWorker {
   }
 
   void ZPull_(int ts, const SArray<Key>& keys, KeyTensorBatch& pull_tensors,
-              int index, int cmd = 0) {
+              int index, int cmd = 0, CudaGraphInfo capture_info = {}) {
+    if (capture_info.stage == CudaGraphInfo::kReplay) {
+      return;
+    }
+
     auto server_ranges =
         Postoffice::GetWorker(instance_id_)->GetServerKeyRanges();
     int server_count = server_ranges.size();
@@ -314,6 +327,7 @@ class AFTensorWorker {
       auto [mappedPtr, tensor_size] = getSafeTensorPtrAndSize(tensor, this);
 
       Message msg;
+      msg.meta.capture_info = capture_info;
       msg.meta.timestamp = ts;
       SArray<char> val;
       SArray<Key> key(1);
@@ -350,7 +364,8 @@ class AFTensorWorker {
   void ZBatchPushPull_(KeyTensorBatch& push_tensors,
                        std::vector<int>& push_timestamps,
                        KeyTensorBatch& pull_tensors,
-                       std::vector<int>& pull_timestamps) {
+                       std::vector<int>& pull_timestamps,
+                       CudaGraphInfo capture_info = {}) {
     PS_CHECK_GE(push_tensors.size() + pull_tensors.size(), 1);
     Backend::Get()->SetDevice(gpu_);
     auto server_ranges =
@@ -362,9 +377,9 @@ class AFTensorWorker {
       SArray<Key> key(1);
       if (push_tensors.size() == 1) {
         *key.data() = push_tensors[0].key;
-        ZPush_(push_timestamps[0], key, push_tensors[0].val);
+        ZPush_(push_timestamps[0], key, push_tensors[0].val, 0, capture_info);
       } else {
-        ZPull_(pull_timestamps[0], key, pull_tensors, 0);
+        ZPull_(pull_timestamps[0], key, pull_tensors, 0, 0, capture_info);
       }
       return;
     }
@@ -376,13 +391,14 @@ class AFTensorWorker {
 
       if (i == 0) {
         ZPush_(push_timestamps[i], key, push_tensors[0].val,
-               AF_FLAG_BATCH_START);
+               AF_FLAG_BATCH_START, capture_info);
         first = false;
       } else if (pull_tensors.empty() && i == push_tensors.size() - 1) {
-        ZPush_(push_timestamps[i], key, push_tensors[i].val, AF_FLAG_BATCH_END);
+        ZPush_(push_timestamps[i], key, push_tensors[i].val, AF_FLAG_BATCH_END,
+               capture_info);
       } else {
         ZPush_(push_timestamps[i], key, push_tensors[i].val,
-               AF_FLAG_BATCH_MIDDLE);
+               AF_FLAG_BATCH_MIDDLE, capture_info);
       }
     }
 
@@ -390,11 +406,14 @@ class AFTensorWorker {
     for (int i = 0; i < pull_batch_size; i++) {
       SArray<Key> key(1);
       if (first && i == 0) {
-        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_START);
+        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_START,
+               capture_info);
       } else if (i == pull_batch_size - 1) {
-        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_END);
+        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_END,
+               capture_info);
       } else {
-        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_MIDDLE);
+        ZPull_(pull_timestamps[i], key, pull_tensors, i, AF_FLAG_BATCH_MIDDLE,
+               capture_info);
       }
     }
   }
@@ -469,6 +488,7 @@ struct AFTensorResponse {
   /** \brief event to synchronize */
   TensorEvent* event = nullptr;
   uint64_t rsp_start;
+  CudaGraphInfo capture_info;
 };
 
 /**
@@ -524,11 +544,15 @@ class AFTensorServer {
         SArray<char> tensor_val;
         auto [mappedPtr, tensor_size] =
             getSafeTensorPtrAndSize(tensors[0].val, this);
-        tensor_val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size, [](void*) {});
+        tensor_val.reset(reinterpret_cast<char*>(mappedPtr), tensor_size,
+                         [](void*) {});
         res.vals = tensor_val;
-
+        meta.pull_metas[0].capture_info =
+            ps::CudaGraphContext::instance().capture_info();
         kv_.Response(meta.pull_metas[0], res, GetEvent());
       } else if (meta.push_metas.size() == 1) {
+        meta.push_metas[0].capture_info =
+            ps::CudaGraphContext::instance().capture_info();
         kv_.Response(meta.push_metas[0]);
       }
     } else {
@@ -556,6 +580,9 @@ class AFTensorServer {
               rsp.event = nullptr;
             }
             rsp.rsp_start = GetNanosecond();
+            ps::CudaGraphContext::instance().record(
+                rsp,
+                [this](AFTensorResponse& rsp) { response_queue_.Push(rsp); });
             response_queue_.Push(std::move(rsp));
             found = true;
             break;
@@ -599,6 +626,7 @@ class AFTensorServer {
         << "rank list and key list have unequal size";
     char* buffer_ptr =
         reinterpret_cast<char*>(Backend::Get()->GetAccessibleAddr(tensor));
+    ps::CudaGraphContext::instance().record_cache(buffer_ptr);
     uint64_t data_size = tensor.numel() * tensor.element_size();
     int chunk_size = data_size / worker_ranks.size();
     PS_CHECK_EQ(data_size % worker_ranks.size(), 0)
@@ -613,9 +641,11 @@ class AFTensorServer {
  private:
   TensorEvent* GetEvent() {
     std::unique_lock<std::mutex> lock(events_mu_);
-    for (auto ev : events_) {
-      if (ev->Occupy()) {
-        return ev;
+    if (!ps::CudaGraphContext::instance().is_capturing()) {
+      for (auto ev : events_) {
+        if (ev->Occupy()) {
+          return ev;
+        }
       }
     }
 

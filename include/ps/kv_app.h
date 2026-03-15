@@ -388,6 +388,7 @@ struct KVMeta {
   struct Trace request_trace;
   /** \brief response trace */
   struct Trace response_trace;
+  mutable CudaGraphInfo capture_info;
 };
 
 /**
@@ -608,6 +609,7 @@ void KVServer<Val>::Response(const KVMeta& req, const KVPairs<Val>& res,
       group_worker_rank, instance_idx_);
 
   Message msg;
+  msg.meta.capture_info = req.capture_info;
   msg.meta.app_id = obj_->app_id();
   msg.meta.customer_id = req.customer_id;
   msg.meta.request = false;

@@ -25,5 +25,15 @@ static const int kServerGroup = 2;
 /** \brief the worker node group ID */
 static const int kWorkerGroup = 4;
 
+struct CudaGraphInfo {
+  enum Stage {
+    kDefault = 0,
+    kCapturing,
+    kReplay
+  };
+  Stage stage = kDefault;
+  int64_t bs = 0;
+};
+
 }  // namespace ps
 #endif  // PS_BASE_H_
