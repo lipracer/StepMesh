@@ -13,6 +13,8 @@
 #include "ps/internal/threadsafe_queue.h"
 
 #define USE_LOCKFREE
+#define CG_DEBUG
+#undef CG_DEBUG
 
 // capture begin
 // attn
@@ -58,11 +60,34 @@ enum class PipelineStage {
 struct CudaGraphContext;
 
 struct CommandQ {
-  CommandQ(CudaGraphContext* ctx) : ctx_(ctx) {}
+  inline static constexpr size_t kPoolSize = 1024;
+
+  CommandQ(CudaGraphContext* ctx) : ctx_(ctx) {
+    tensor_events_ =
+        reinterpret_cast<TensorEvent*>(malloc(sizeof(TensorEvent) * kPoolSize));
+    native_events_ =
+        reinterpret_cast<Event*>(malloc(sizeof(TensorEvent) * kPoolSize));
+  }
+
+  ~CommandQ() {
+    free(tensor_events_);
+    free(native_events_);
+  }
+
+  CommandQ(const CommandQ&) = delete;
+  CommandQ& operator=(const CommandQ&) = delete;
+
+  std::tuple<void*, void*> alloc_event();
+  void free_event();
 
   std::vector<void*> cmds;
   std::vector<std::function<void(void*)>> invokers;
-  std::function<void(void*)> reset_cmd;
+  TensorEvent* tensor_events_;
+  Event* native_events_;
+  std::atomic<size_t> pool_start_{0};
+  std::atomic<size_t> pool_end_{0};
+
+  std::function<void(CommandQ*, size_t)> reset_cmd;
 
   void record(void* cmd, std::function<void(void*)> invoker) {
     cmds.push_back(cmd);
@@ -78,7 +103,6 @@ struct SMGraph {
 };
 
 struct CudaGraphContext {
-  enum { kTerminate = -1 };
 
   CudaGraphContext() {}
 
@@ -86,15 +110,7 @@ struct CudaGraphContext {
 
   static CudaGraphContext& instance();
 
-  void set_config(int64_t num_micro_batch, Node::Role role) {
-    num_micro_batch_ = num_micro_batch;
-    role_ = role;
-    if (role_ == Node::WORKER) {
-      expect_flag_value_.resize(num_micro_batch, 1);
-    } else if (role_ == Node::SERVER) {
-      expect_flag_value_.resize(num_micro_batch, 2);
-    }
-  }
+  void set_config(int64_t num_micro_batch, Node::Role role);
 
   void capture_begin();
   void destroy();
@@ -159,15 +175,13 @@ struct CudaGraphContext {
         break;
       }
     }
-    CHECK(stage < host_flag_buffer_.size());
+    CHECK(static_cast<size_t>(stage) < host_flag_buffer_.size());
 
-    // 使用per-stage的sync计数器作为layer_id，而不是全局的layer_id_
-    // 这样可以确保每次sync使用正确的layer，不受主循环异步更新的影响
     int64_t sync_layer = sync_count_[stage];
     sync_count_[stage]++;
 
     int expected = expect_flag_value_[stage] + 2 * sync_layer;
-
+#ifdef CG_DEBUG
     auto fetch_flag_values = [&]() {
       std::ostringstream oss;
       for (int64_t i = 0; i < num_micro_batch_; ++i) {
@@ -175,15 +189,14 @@ struct CudaGraphContext {
       }
       return oss.str();
     };
-
-    // 使用cudaMemcpy从device读取flag，绕过host映射的缓存一致性问题
-    int cur_value = read_flag_from_device(stage);
     int wait_count = 0;
+#endif
+    int cur_value = read_flag_from_device(stage);
     while (cur_value != expected) {
       std::this_thread::sleep_for(
-          std::chrono::milliseconds(100));  // 改大到100ms验证PCIe读干扰假设
+          std::chrono::milliseconds(1)); 
       cur_value = read_flag_from_device(stage);
-      // 每1000次打印一次日志，避免日志过多
+#ifdef CG_DEBUG
       if (wait_count++ % 1 == 0) {
         std::ostringstream oss;
         for (int64_t i = 0; i < num_micro_batch_; ++i) {
@@ -193,8 +206,9 @@ struct CudaGraphContext {
                      << " expected:" << expected
                      << " flag_buffer:" << oss.str();
       }
+#endif
     }
-#if 0
+#ifdef CG_DEBUG
     std::ostringstream oss;
     oss << " data:";
     for (size_t i = 0; i < 16; ++i) {
@@ -217,21 +231,16 @@ struct CudaGraphContext {
     return sync(N_EVENT(event));
   }
 
-  void regist_flag(const std::vector<void*>& flags) {
-    device_flag_buffer_ = flags;
-    for (auto it : device_flag_buffer_) {
-      host_flag_buffer_.push_back(
-          Backend::Get()->GetAccessibleAddr(device_flag_buffer_[stage], 0));
-    }
+  int destroy_wait_event(void* e) {
+    cmd_q()->free_event();
+    return 0;
+  }
 
-    // 通过cudaMemcpy从device读取flag值
-    // flag_buffer_ 现在直接存储 device 地址
-    int read_flag_from_device(int stage) {
+  void regist_flag(const std::vector<void*>& flags);
+
+  int read_flag_from_device(int stage) {
 #if 0
     int value = 0;
-    // CUDAGraph replay 在 captured stream 上执行，需要同步所有 stream
-    // 确保 kernel 写入完成后再读取
-    // flag_buffer_[stage] 现在直接是 device 地址，和 kernel 写入的地址一致
     cudaMemcpy(&value, device_flag_buffer_[stage], sizeof(int),
                cudaMemcpyDeviceToHost);
     return value;

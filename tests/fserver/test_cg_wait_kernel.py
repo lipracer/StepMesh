@@ -56,7 +56,7 @@ if is_worker:
         global push_tensors
         for i in range(num_layers):
             for micro_batch in range(num_micro_batch):
-                inputs[micro_batch] += (micro_batch + 1)
+                inputs[micro_batch] = inputs[micro_batch] + (micro_batch + 1)
                 attn_communicator.send(inputs[micro_batch])
                 inputs[micro_batch] = attn_communicator.recv()
 
@@ -75,28 +75,28 @@ if is_worker:
     # torch.cuda.synchronize()
     print(f"replay test=1 done inputs:{inputs}", flush=True)
 
-    # assert torch.allclose(inputs[0], org_inputs[0] * 1)
-    # assert torch.allclose(inputs[1], org_inputs[1] * 4)
-    # assert torch.allclose(inputs[2], org_inputs[2] * 7)
+    assert torch.allclose(inputs[0], org_inputs[0] + 1 + 2 + 1 + 2), f"input:{inputs[0]} vs {org_inputs[0] + 1 + 2 + 1 + 2}"
+    assert torch.allclose(inputs[1], org_inputs[1] + 2 + 4 + 2 + 4)
+    assert torch.allclose(inputs[2], org_inputs[2] + 3 + 6 + 3 + 6)
 
     graphs[-1].replay()
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
     print(f"replay test=2 done push_tensors:{inputs}", flush=True)
 
-    torch.cuda.synchronize()
-
-
-    # run_forward()
     # torch.cuda.synchronize()
-    # print(f"new forward test=3 done push_tensors:{inputs}", flush=True)
 
-    # run_forward()
-    # torch.cuda.synchronize()
-    # print(f"new forward test=3 done push_tensors:{inputs}", flush=True)
 
-    # graphs[-1].replay()
+    run_forward()
     # torch.cuda.synchronize()
-    # print(f"replay test=3 done push_tensors:{inputs}", flush=True)
+    print(f"new forward test=3 done push_tensors:{inputs}", flush=True)
+
+    run_forward()
+    # torch.cuda.synchronize()
+    print(f"new forward test=3 done push_tensors:{inputs}", flush=True)
+
+    graphs[-1].replay()
+    # torch.cuda.synchronize()
+    print(f"replay test=3 done push_tensors:{inputs}", flush=True)
 
 
 elif is_server:
@@ -106,13 +106,24 @@ elif is_server:
         num_micro_batch,
         cache_tensor,
     )
+    first_run = [False for i in range(num_micro_batch)]
 
     def run_forward():
         for i in range(num_layers):
             for micro_batch in range(num_micro_batch):
                 hs = ffn_communicator.recv()
+                if first_run[micro_batch]:
+                    print(f"recv hs:{hs}", flush=True)
+
                 hs += 2 * (micro_batch + 1)
+
+                if first_run[micro_batch]:
+                    print(f"send hs:{hs}", flush=True)
                 hs = ffn_communicator.send(hs)
+
+                if not first_run[micro_batch] and i == 1:
+                    first_run[micro_batch] = True
+
 
     graphs = []
     graphs.append(fserver.SMCudaGraph())
@@ -135,18 +146,19 @@ elif is_server:
     graphs[-1].replay()
     print("server replay=2 done", flush=True)
 
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
 
     # check rdma status
-    # run_forward()
-    # print("server new forward done", flush=True)
+    run_forward()
+    print("server new forward done", flush=True)
 
-    # run_forward()
-    # print("server new forward done", flush=True)
+    run_forward()
+    print("server new forward done", flush=True)
 
-    # graphs[-1].replay()
-    # print("server replay=3 done", flush=True)
+    graphs[-1].replay()
+    print("server replay=3 done", flush=True)
 
-time.sleep(1000)
+if "scheduler" == os.environ.get("DMLC_ROLE"):
+    time.sleep(10)
 print(f"before stop===================================", flush=True)
 f.stop()

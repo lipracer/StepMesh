@@ -203,6 +203,9 @@ void* KlxBackend::CreateEvent() {
 int KlxBackend::FreeEvent(void* event) {
   DoInitGpu();
   PS_CHECK_NE(event, nullptr) << "backend cannot free null event";
+  if (W_EVENT(event)->kind == Event::kGraphEventReplaying) {
+    return CudaGraphContext::instance().destroy_wait_event(W_EVENT(event));
+  }
   auto e = event;
   event = N_EVENT(event);
   free(e);
